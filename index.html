@@ -117,8 +117,10 @@
                         const remoteAnswer = JSON.parse(res.answer)
                         const remoteICE = JSON.parse(res.answerICE)
                         console.log(remoteICE)
-                        remoteICE.forEach(conn.addIceCandidate)
-                        await conn.setRemoteDescription(remoteAnswer)
+                        remoteICE.forEach(ICE => conn.addIceCandidate(ICE))
+                        if (!conn.currentRemoteDescription) {
+                          await conn.setRemoteDescription(remoteAnswer)
+                        }
                         if (conn.connectionState != "connected") {
                             flashMsg("Need more ICE Candidates, Making New Offer...")
                             callee(username, "calleeOffer", {offerICE:JSON.stringify(localICE)})
@@ -160,7 +162,7 @@
                         const remoteOffer = JSON.parse(res.offer)
                         const remoteICE = JSON.parse(res.offerICE)
                         console.log(remoteICE)
-                        remoteICE.forEach(conn.addIceCandidate)
+                        remoteICE.forEach(ICE => conn.addIceCandidate(ICE))
                         await conn.setRemoteDescription(remoteOffer)
                         const answer = await conn.createAnswer()
                         await conn.setLocalDescription(answer)
