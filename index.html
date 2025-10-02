@@ -118,7 +118,9 @@
                         const remoteICE = JSON.parse(res.answerICE)
                         console.log(remoteICE)
                         remoteICE.forEach(ICE => conn.addIceCandidate(ICE))
-                        await conn.setRemoteDescription(remoteAnswer)
+                        if (!conn.currentRemoteDescription) {
+                          await conn.setRemoteDescription(remoteAnswer)
+                        }
                         if (conn.connectionState != "connected") {
                             flashMsg("Need more ICE Candidates, Making New Offer...")
                             callee(username, "calleeOffer", {offerICE:JSON.stringify(localICE)})
