@@ -1,5 +1,293 @@
 <!doctype html>
 <html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Client</title>
+    <style>
+        body {
+            padding:0;
+            margin:0;
+            width:100vw;
+            height:100vh;
+        }
+
+        * {
+            box-sizing:border-box;
+        }
+    </style>
+
+    <script>
+        const servers = {
+            iceServers: [{
+                urls: [
+                    "stun:stun.l.google.com:19302",
+                    "stun:stun.l.google.com:5349",
+                    "stun:stun1.l.google.com:3478",
+                    "stun:stun1.l.google.com:5349",
+                    "stun:stun2.l.google.com:19302",
+                    "stun:stun2.l.google.com:5349",
+                    "stun:stun3.l.google.com:3478",
+                    "stun:stun3.l.google.com:5349",
+                    "stun:stun4.l.google.com:19302",
+                    "stun:stun4.l.google.com:5349"
+                ]
+            }]
+        }
+
+        const devURL = "https://script.google.com/macros/s/AKfycbzry_FDldtQWF48wM9tFypFLOgYI5hXLA6vyCdwqEnT/dev"
+        const prodURL = "https://script.google.com/macros/s/AKfycbzRIfYEpSr5BRMgLYdAZK78QEs6mo_VMTwGHMNXcHDkbMSIzBCubRF_0Q6stlxWOInjAw/exec"
+        const appsScriptURL = prodURL
+
+        // be really careful, if reloaded things need to get reset, and idk how the other client will react with such a slow server
+        const conn = new RTCPeerConnection(servers)
+        let localICE = []
+        let channels = new Map()
+        let tracks = new Map()
+        
+        const scriptFetchJSON = (route, data) => new Promise((res, rej) => fetch(appsScriptURL, {method:"POST", body:JSON.stringify({route:route,data:data})}).then(r => r.json().then(res)).catch(rej))
+        const scriptFetchText = (route, data) => new Promise((res, rej) => fetch(appsScriptURL, {method:"POST", body:JSON.stringify({route:route,data:data})}).then(r => r.text().then(res)).catch(rej))
+    
+        let errorTimeout = undefined
+        function flashMsg(msg, error) {
+            const msgElement = document.getElementById("message")
+            msgElement.innerText = msg
+            msgElement.style.color = error?"red":"black"
+            window.clearTimeout(errorTimeout)
+            errorTimeout = window.setTimeout(() => document.getElementById("message").innerText = "",3000)
+        }
+
+        // add media tracks, also do ice listening cause tracks are nessecary for ice generation
+        async function addTracks() {
+            let localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:false})
+            let remoteStream = new MediaStream()
+            console.log("Got streams")
+
+            document.getElementById("localVideo").srcObject = localStream
+            document.getElementById("remoteVideo").srcObject = remoteStream
+            conn.addTrack(localStream.getVideoTracks()[0])
+            console.log("Added tracks")
+
+            conn.onicecandidate = event => {
+                if (event.candidate) {localICE.push(event.candidate)}
+            }
+            conn.ondatachannel =  event => {
+                console.log("channelEvent!",event)
+                channels.set(event.channel.label, event.channel); 
+            }
+            conn.ontrack =        event => {
+                console.log("trackEvent!",event)
+                tracks.set(event.track.label, event.track);  
+                remoteStream.addTrack(event.track)
+            }
+
+        }
+        addTracks()
+
+        function callee(username, action, data) {
+            console.log("callee loop, action:", action,"data:", data)
+            scriptFetchJSON("/state", {username:username, action:action, data:data}).then(async res => {
+                console.log("apps script response:",res)
+
+                if (res.returnMessage.includes("ERROR")) {
+                    flashMsg(res.returnMessage, true)
+                    return
+                }
+
+                if (conn.connectionState == "connected") {
+                    if (res.state != "DONE") {
+                        callee(username, "calleeOK", {})
+                        return
+                    }
+                } 
+
+                switch(res.state) {
+                    case "START":     // send offer
+                        flashMsg("Making RTC Offer...")
+                        const offer = await conn.createOffer();
+                        await conn.setLocalDescription(offer);
+                        callee(username, "calleeOffer", {offer:JSON.stringify(offer),offerICE:JSON.stringify(localICE)})
+                        break
+                    case "OFFER":    // wait for response
+                        flashMsg("Waiting for RTC Answer...")
+                        callee(username, "poll", {}) // poll
+                        break
+                    case "ANSWER": // set back to DONE
+                        flashMsg("Received RTC Answer!")
+                        const remoteAnswer = JSON.parse(res.answer)
+                        const remoteICE = JSON.parse(res.answerICE)
+                        console.log(remoteICE)
+                        remoteICE.forEach(ICE => conn.addIceCandidate(ICE))
+                        await conn.setRemoteDescription(remoteAnswer)
+                        if (conn.connectionState != "connected") {
+                            flashMsg("Need more ICE Candidates, Making New Offer...")
+                            callee(username, "calleeOffer", {offerICE:JSON.stringify(localICE)})
+                        } else {
+                            callee(username, "calleeOK", {})
+                        }
+                        break
+                    case "DONE":
+                        flashMsg("Connected!")
+                        console.log("end of loop")
+                }
+            })
+        }
+
+        function caller(username, action, data) {
+            console.log("caller loop, action:", action,"data:",data)
+            scriptFetchJSON("/state", {username:username, action:action, data:data}).then(async res => {
+                console.log(res)
+
+                if (res.returnMessage.includes("ERROR")) {
+                    flashMsg(res.returnMessage, true)
+                    return
+                }
+
+                if (conn.connectionState == "connected") {
+                    if (res.state != "DONE") {
+                        callee(username, "calleeOK", {})
+                        return
+                    }
+                } 
+
+                switch(res.state) {
+                    case "START":
+                        flashMsg(res.lastAction==""?"Waiting for RTC Offer...":"Waiting for RTC Offer With More ICE...")
+                        caller(username, "poll", {}) // poll
+                        break
+                    case "OFFER":     // wait for offer
+                        flashMsg("Recieved RTC Offer, Making RTC Answer!")
+                        const remoteOffer = JSON.parse(res.offer)
+                        const remoteICE = JSON.parse(res.offerICE)
+                        console.log(remoteICE)
+                        remoteICE.forEach(ICE => conn.addIceCandidate(ICE))
+                        await conn.setRemoteDescription(remoteOffer)
+                        const answer = await conn.createAnswer()
+                        await conn.setLocalDescription(answer)
+                        caller(username, "callerAnswer", {answer:JSON.stringify(answer), answerICE:JSON.stringify(localICE)})
+                        break
+                    case "ANSWER":
+                        flashMsg("Waiting for RTC Answer to be Received...")
+                        caller(username, "poll", {}) // poll
+                        break
+                    case "DONE":
+                        if (res.lastAction == "") {
+                            caller(username, action, data)
+                            break
+                        }
+                        flashMsg("Connected!")
+                        console.log("end of loop")
+                }
+            })
+        }
+
+        function startCall() {
+            const username = document.getElementById("username").value
+            if (username == "") {
+                flashMsg("Username Invalid",true)
+                return
+            }      
+            flashMsg("Starting Call...",false) 
+            callee(username,'calleeStart',{ice:JSON.stringify(localICE)})
+        }
+
+        function callUser() {
+            const username = document.getElementById("username").value
+            if (username == "") {
+                flashMsg("Username Invalid",true)
+                return
+            }    
+            flashMsg("Calling...",false) 
+            caller(username,'',{})
+        }
+
+        function createUser() {
+            flashMsg("Creating User...")
+            const username = document.getElementById("username").value
+            if (username == "") {
+                flashMsg("Username Invalid",true)
+                return
+            }
+
+            scriptFetchText("/createUser",{username:username}).then(msg => flashMsg(msg.includes("ERROR")?msg:"User Created!",msg.includes("ERROR")))
+        }
+
+    </script>
+</head>
+    <body>
+        <div style="display:flex; flex-direction:row; width:100%; height:100%;">
+            <div style="display:flex; flex-direction:column; padding: 20px; width: 100%; height: 100%;">
+                <div id="image" style="width:min(50vw, 50vh); margin-bottom: 10px; aspect-ratio:1; background-color: black;">
+                    <!-- <img id="video" style="width: 100%; height:100%;"/> -->
+                    <video id="localVideo" style="width: 100%; height: 100%;" autoplay playsinline></video>
+                 </div>
+
+                <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="startCall()">Start Call</button>
+                <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="callUser()">Call User</button>
+                <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="createUser()">Create User</button>
+                <!-- <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="writeID()">write id</button> -->
+                <input id="username" style="width: 100%; height: 30px; margin-bottom: 10px; font-size: 30px; text-align: center;" contenteditable placeholder="Username"/>
+                <div id="message" style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px; text-align: center; color:red;"></div>
+            </div>
+
+            <div style="display:flex; flex-direction:column; padding: 20px; width: 100%; height: 100%;">
+                <div id="image" style="width:min(50vw, 50vh); margin-bottom: 10px; aspect-ratio:1; background-color: black;">
+                    <!-- <img id="video" style="width: 100%; height:100%;"/> -->
+                    <video id="remoteVideo" style="width: 100%; height: 100%;" autoplay playsinline></video>               
+                </div>
+
+                <!-- <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="callee('evan','calleeStart',{})">StartCall</button> -->
+                <!-- <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="caller('evan','',{})">CallUser</button> -->
+                <!-- <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="createUser()">Create User</button> -->
+                <!-- <button style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px;" onclick="writeID()">write id</button> -->
+                <!-- <input id="username" style="width: 100%; height: 30px; margin-bottom: 10px; font-size: 30px; text-align: center;" contenteditable placeholder="Username"/> -->
+                <!-- <div id="error" style="width: 100%; height: 50px; margin-bottom: 10px; font-size: 30px; text-align: center; color:red;"></div> -->
+            </div>
+
+            <!-- <div style="display:flex; flex-direction:column; padding: 20px; width: 50%; height: 100%;">
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">flower status:</div>
+                    <div id="flowerstatus"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">retina status:</div>
+                    <div id="retinastatus"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">rssi:</div>
+                    <div id="rssi"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">battery:</div>
+                    <div id="battery"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">soc:</div>
+                    <div id="soc"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">fps:</div>
+                    <div id="fps"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">capsule used:</div>
+                    <div id="capsuleused"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">detected id:</div>
+                    <div id="detectedid"></div>
+                </div>
+                <div style="display:flex; flex-direction:row; font-size: 30px; margin-bottom: 10px;">
+                    <div style="flex-grow: 1;">input id:</div>
+                    <div id="scannedid"></div>
+                </div>
+            </div>
+        </div> -->
+    </body>
+</html>
+
+<!-- <!doctype html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/Favicon.png" />
@@ -30,4 +318,4 @@
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
-</html>
+</html> -->
